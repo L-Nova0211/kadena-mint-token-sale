@@ -1,0 +1,381 @@
+(load "kda-env/init.repl")
+
+(begin-tx "Deploy mintit")
+
+(env-keys ["admin"])
+(env-data {
+  "admin": { "keys": ["admin"], "pred": "keys-all" },
+  "mintit-admin": { "keys": ["admin"], "pred": "keys-all" },
+  "alice-keyset": { "keys": ["alice-key"], "pred": "keys-all" },
+  "bob-keyset": { "keys": ["bob-key"], "pred": "keys-all" }
+})
+
+(load "mintit-policy.pact")
+(use free.mintit-policy-v3)
+
+(create-table governance-table)
+(create-table nft-collection-table)
+(create-table nft-table)
+(create-table nft-collection-token-hashes-table)
+(create-table quotes-table)
+
+(create-admin-guard (read-keyset "admin"))
+
+;; Create an NFT
+(init-nft-collection {
+  "creator": "luzzluzzluzzluzzluzzluzzluzzluzzluzzluzzluzzluzzluzzluzzluzzluzzot",
+  "description": "a test",
+  "name": "Swag",
+  "type": "public",
+  "provenance-hash": "abcabcabcabcabcabcabcabcabcabcabcabc1234567",
+  "mint-starts": (time "1970-01-01T00:00:00Z"),
+  "premint-ends": (time "1970-01-01T00:00:00Z"),
+  "premint-whitelist": [],
+  "size": 10,
+  "mint-price": 10.0,
+  "premint-price": 5.0,
+  "mint-royalties": {
+    "rates": [
+      {
+        "description": "A",
+        "stakeholder": "alice",
+        "stakeholder-guard": (read-keyset "alice-keyset"),
+        "rate": 0.9
+      },
+      {
+        "description": "B",
+        "stakeholder": "bob",
+        "stakeholder-guard": (read-keyset "bob-keyset"),
+        "rate": 0.1
+      }
+    ]
+  },
+  "sale-royalties": {
+    "rates": [
+      {
+        "description": "A",
+        "stakeholder": "alice",
+        "stakeholder-guard": (read-keyset "alice-keyset"),
+        "rate": 0.9
+      },
+      {
+        "description": "B",
+        "stakeholder": "bob",
+        "stakeholder-guard": (read-keyset "bob-keyset"),
+        "rate": 0.1
+      }
+    ]
+  },
+  "fungible": coin,
+  "token-list": ["1", "2", "3", "4", "5", "6", "7", "8", "9", "10"]
+})
+
+(commit-tx)
+
+
+
+(begin-tx "Create alt token purchase and buy nft")
+
+(env-keys ["carol-key"])
+(env-data {
+  "gov": { "keys": ["gov"], "pred": "keys-all" },
+  "ops": { "keys": ["ops"], "pred": "keys-all" },
+  "carol-keyset": { "keys": ["carol-key"], "pred": "keys-all" },
+  "dave-keyset": { "keys": ["dave-key"], "pred": "keys-all" },
+  "init": true
+})
+(load "mintit-alt-token-sale.pact")
+
+(use free.mintit-alt-token-sale)
+
+(env-keys ["carol-key"])
+(env-data {
+  "carol-keyset": { "keys": ["carol-key"], "pred": "keys-all" }
+})
+; Create the mintit alt coin
+(create-mintit-alt-coin
+  "SwagAltSale"
+  "Swag"
+  "bank"
+  coin
+  2.0
+  true
+  (read-keyset "carol-keyset"))
+
+; Fund the bank
+(env-sigs [
+  {
+    "key": "carol-key",
+    "caps": [
+      (coin.TRANSFER "carol" "bank" 1000.0)
+    ]
+  }
+])
+(coin.transfer "carol" "bank" 1000.0)
+
+; Expect failure before whitelist
+(env-keys ["dave-key"])
+(env-data {
+  "dave-keyset": { "keys": ["dave-key"], "pred": "keys-all" }
+})
+(expect-failure "Can't purchase without whitelist"
+  "Must be whitelisted"
+  (mint-with-alt-coin "dave" "SwagAltSale" (read-keyset "dave-keyset"))
+)
+
+; Add whitelisted
+(env-keys ["carol-key"])
+(add-whitelisted "SwagAltSale" ["dave"])
+
+(env-keys ["dave-key"])
+(env-data {
+  "dave-keyset": { "keys": ["dave-key"], "pred": "keys-all" }
+})
+(env-sigs [
+  {
+    "key": "dave-key",
+    "caps": [
+      (coin.TRANSFER "dave" "bank" 20.0)
+    ]
+  }
+])
+(expect-that "Can purchase"
+  (= true)
+  (mint-with-alt-coin "dave" "SwagAltSale" (read-keyset "dave-keyset"))
+)
+(expect-that "Balances correct"
+  (= [1009.0 1001.0 0.0 980.0])
+  [
+    (coin.get-balance "alice")
+    (coin.get-balance "bob")
+    (coin.get-balance (get-managed-account-for-buyer "dave"))
+    (coin.get-balance "dave")
+  ]
+)
+
+(commit-tx)
+
+
+
+(begin-tx "Buy another NFT")
+(use free.mintit-alt-token-sale)
+
+(env-keys ["dave-key"])
+(env-data {
+  "dave-keyset": { "keys": ["dave-key"], "pred": "keys-all" }
+})
+(env-sigs [
+  {
+    "key": "dave-key",
+    "caps": [
+      (coin.TRANSFER "dave" "bank" 20.0)
+      (MANAGED "dave")
+    ]
+  }
+])
+(expect-that "Can purchase"
+  (= true)
+  (mint-with-alt-coin "dave" "SwagAltSale" (read-keyset "dave-keyset"))
+)
+(expect-that "Balances correct"
+  (= [1018.0 1002.0 0.0 960.0])
+  [
+    (coin.get-balance "alice")
+    (coin.get-balance "bob")
+    (coin.get-balance (get-managed-account-for-buyer "dave"))
+    (coin.get-balance "dave")
+  ]
+)
+(expect-that "Can see revealed nft"
+  (= 2)
+  (length (get-owned-nfts "dave"))
+)
+
+(expect-that "No revealed nfts yet"
+  (= 0)
+  (length (get-revealed-nfts "dave"))
+)
+
+(commit-tx)
+
+
+
+(begin-tx "Reveal NFT 1")
+(use free.mintit-policy-v3)
+
+(expect-failure "No account"
+  "row not found"
+  (marmalade.ledger.get-balance 
+    "Swag-0" 
+    (free.mintit-alt-token-sale.get-managed-account-for-buyer "dave"))
+)
+
+(env-keys ["admin"])
+(reveal-nft {
+  "name": "Swag-0",
+  "description": "A cool nft",
+  "content-hash": (get-nft-collection-token-hash "Swag" 0),
+  "spec": {
+    "type": "normal",
+    "value": {}
+  },
+  "collection-name": "Swag",
+  "content-uri": {
+    "scheme": "ipfs",
+    "data": "abcd"
+  },
+  "marmalade-token-id": "Swag-0",
+  "edition": 1,
+  "creator": "luzzluzzluzzluzzluzzluzzluzzluzzluzzluzzluzzluzzluzzluzzluzzluzzot"
+})
+
+(expect-that "Token was created"
+  (= 1.0)
+  (marmalade.ledger.get-balance 
+    "Swag-0" 
+    (free.mintit-alt-token-sale.get-managed-account-for-buyer "dave"))
+)
+(expect-that "1 revealed nft"
+  (= 1)
+  (length (free.mintit-alt-token-sale.get-revealed-nfts "dave"))
+)
+
+(commit-tx)
+(begin-tx "Reveal NFT 2")
+(use free.mintit-policy-v3)
+
+(expect-failure "No account"
+  "row not found"
+  (marmalade.ledger.get-balance 
+    "Swag-1" 
+    (free.mintit-alt-token-sale.get-managed-account-for-buyer "dave"))
+)
+
+(env-keys ["admin"])
+(reveal-nft {
+  "name": "Swag-1",
+  "description": "A cool nft",
+  "content-hash": (get-nft-collection-token-hash "Swag" 1),
+  "spec": {
+    "type": "normal",
+    "value": {}
+  },
+  "collection-name": "Swag",
+  "content-uri": {
+    "scheme": "ipfs",
+    "data": "abcd"
+  },
+  "marmalade-token-id": "Swag-1",
+  "edition": 1,
+  "creator": "luzzluzzluzzluzzluzzluzzluzzluzzluzzluzzluzzluzzluzzluzzluzzluzzot"
+})
+(expect-that "Token was created"
+  (= 1.0)
+  (marmalade.ledger.get-balance 
+    "Swag-1" 
+    (free.mintit-alt-token-sale.get-managed-account-for-buyer "dave"))
+)
+(expect-that "2 revealed nfts"
+  (= 2)
+  (length (free.mintit-alt-token-sale.get-revealed-nfts "dave"))
+)
+
+(commit-tx)
+
+
+
+(begin-tx "Claim NFTs")
+(use free.mintit-alt-token-sale)
+
+(env-keys [])
+(env-data {
+  "carol-keyset": { "keys": ["carol-key"], "pred": "keys-all"}
+})
+(env-sigs [
+  {
+    "key": "carol-key",
+    "caps": [
+      (MANAGED "dave")
+    ]
+  }
+])
+(expect-failure "Can't claim for someone else"
+  "Keyset failure (keys-all): [dave"
+  (claim-nfts "dave" (read-keyset "carol-keyset"))
+)
+
+(env-keys ["dave-key"])
+(env-data {
+  "dave-keyset": { "keys": ["dave-key"], "pred": "keys-all"}
+})
+(env-sigs [
+  {
+    "key": "dave-key",
+    "caps": [
+      (MANAGED "dave")
+    ]
+  }
+])
+(expect-that "Can claim"
+  (= [true true])
+  (claim-nfts "dave" (read-keyset "dave-keyset"))
+)
+
+(commit-tx)
+
+
+
+(begin-tx "Test withdraw")
+(use free.mintit-alt-token-sale)
+
+(env-keys ["dave-key"])
+(env-sigs [
+  {
+    "key": "dave-key",
+    "caps": [
+      (MINTIT_ALT_COIN_MANAGER "SwagAltSale")
+    ]
+  }
+])
+(expect-failure "Can't withdraw without guard"
+  "Keyset failure"
+  (withdraw-from-bank "SwagAltSale" "dave" 100.0)
+)
+
+(env-keys ["carol-key"])
+(env-sigs [
+  {
+    "key": "carol-key",
+    "caps": [
+      (MINTIT_ALT_COIN_MANAGER "SwagAltSale")
+    ]
+  }
+])
+;; Bank has more money because the test uses coin for alt
+;; They were paying double what it cost to actually mint.
+;; Don't do this at home kids.
+(expect-that "Balances are correct"
+  (= [1020.0 0.0]) 
+  [
+    (coin.get-balance "bank")
+    (coin.get-balance "carol")
+  ]
+)
+(expect-that "Can withdraw"
+  (= "Withdrew 100.0 coins from bank to carol")
+  (withdraw-from-bank "SwagAltSale" "carol" 100.0)
+)
+(expect-that "Balances are correct"
+  (= [920.0 100.0])
+  [
+    (coin.get-balance "bank")
+    (coin.get-balance "carol")
+  ]
+)
+
+(expect-that "Bank is correct"
+  (= "bank")
+  (get-bank-for-alt-sale "SwagAltSale")
+)
+
+(commit-tx)
